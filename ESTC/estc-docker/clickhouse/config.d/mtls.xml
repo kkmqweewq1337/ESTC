@@ -1,0 +1,22 @@
+<clickhouse>
+    <tcp_port_secure>9440</tcp_port_secure>
+    <https_port>8443</https_port>
+    <openSSL>
+        <server>
+            <!-- CRT -->
+            <certificateFile>/etc/clickhouse-server/certs/server.crt</certificateFile>
+            <privateKeyFile>/etc/clickhouse-server/certs/server.key</privateKeyFile>
+
+            <!-- CA -->
+            <caConfig>/etc/clickhouse-server/certs/ca.crt</caConfig>
+
+            <!-- mTLS -->
+            <verificationMode>strict</verificationMode>
+
+            <loadDefaultCAFile>true</loadDefaultCAFile>
+            <cacheSessions>true</cacheSessions>
+            <disableProtocols>sslv2,sslv3</disableProtocols>
+            <preferServerCiphers>true</preferServerCiphers>
+        </server>
+    </openSSL>
+</clickhouse>
