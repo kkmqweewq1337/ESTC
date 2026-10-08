@@ -1,0 +1,7 @@
+---
+deploy_scripts_remote_dir: "/tmp/deploy_scripts"
+deploy_scripts_mode: "0755"
+deploy_scripts_owner: "root"
+deploy_scripts_group: "root"
+deploy_scripts_cleanup: true
+...

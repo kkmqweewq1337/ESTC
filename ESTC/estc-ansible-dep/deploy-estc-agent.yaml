@@ -1,0 +1,16 @@
+---
+- name: Deploy ESTC agent
+  hosts: all
+  gather_facts: false
+
+  roles:
+    - role: deploy_estc_agent
+      vars:
+        deploy_scripts_remote_dir: "/opt/deploy"
+        deploy_scripts_cleanup: true
+# RUN
+#
+#ansible-playbook -i roles/deploy_estc_agent/invent/inventory.ini deploy-estc-agent.yml -k
+#
+
+...

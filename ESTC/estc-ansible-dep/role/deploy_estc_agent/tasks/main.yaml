@@ -1,0 +1,52 @@
+---
+- name: Checking for the presence of local scripts
+  ansible.builtin.stat:
+    path: "{{ role_path }}/files/{{ item }}"
+  delegate_to: localhost
+  become: false
+  register: deploy_scripts_local_check
+  loop:
+    - uninstall.sh
+    - install.sh
+  failed_when: not deploy_scripts_local_check.stat.exists
+
+- name: Create a directory for scripts
+  ansible.builtin.file:
+    path: "{{ deploy_scripts_remote_dir }}"
+    state: directory
+    mode: "0755"
+    owner: "{{ deploy_scripts_owner }}"
+    group: "{{ deploy_scripts_group }}"
+
+- name: Copy scripts to the remote host
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "{{ deploy_scripts_remote_dir }}/{{ item }}"
+    mode: "{{ deploy_scripts_mode }}"
+    owner: "{{ deploy_scripts_owner }}"
+    group: "{{ deploy_scripts_group }}"
+  loop:
+    - uninstall.sh
+    - install.sh
+
+- name: RUN uninstall.sh && install.sh
+  ansible.builtin.shell: |
+    set -e
+    cd "{{ deploy_scripts_remote_dir }}"
+    ./uninstall.sh && ./install.sh
+  args:
+    chdir: "{{ deploy_scripts_remote_dir }}"
+    executable: /bin/bash
+  register: deploy_scripts_result
+  changed_when: deploy_scripts_result.rc == 0
+
+- name: Result
+  ansible.builtin.debug:
+    msg: "{{ deploy_scripts_result.stdout_lines }}"
+
+- name: Cleanup
+  ansible.builtin.file:
+    path: "{{ deploy_scripts_remote_dir }}"
+    state: absent
+  when: deploy_scripts_cleanup | bool
+...
