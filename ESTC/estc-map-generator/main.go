@@ -10,33 +10,34 @@ import (
 	"html"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
-        "text/template"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"text/template"
 	"time"
 )
 
 var (
-        chHost     = getEnv("CLICKHOUSE_HOST", "127.0.0.1")
-        chPort     = getEnv("CLICKHOUSE_PORT", "8443")
-        chDB       = getEnv("CLICKHOUSE_DB", "ESTC")
-        chUser     = getEnv("CLICKHOUSE_USER", "estc_agent")
-        chPass     = url.QueryEscape(getRequiredEnv("CLICKHOUSE_PASS"))
-        outputDir  = getEnv("MAP_OUTPUT_DIR", "/opt/sds-docker/network_map/map/")
-        caCertPath = getEnv("CH_CA_CERT", "/opt/sds-docker/network_map/certs/ca.crt")
-        clientCert = getEnv("CH_CLIENT_CERT", "/opt/sds-docker/network_map/certs/client.crt")
-        clientKey  = getEnv("CH_CLIENT_KEY", "/opt/sds-docker/network_map/certs/client.key")
+	chHost     = getEnv("CLICKHOUSE_HOST", "127.0.0.1")
+	chPort     = getEnv("CLICKHOUSE_PORT", "8443")
+	chDB       = getEnv("CLICKHOUSE_DB", "ESTC")
+	chUser     = getEnv("CLICKHOUSE_USER", "estc_agent")
+	chPass     = getEnv("CLICKHOUSE_PASS", "")
+	outputDir  = getEnv("MAP_OUTPUT_DIR", "/opt/estc-docker/network_map/map/")
+	caCertPath = getEnv("CH_CA_CERT", "/opt/estc-docker/network_map/certs/ca.crt")
+	clientCert = getEnv("CH_CLIENT_CERT", "/opt/estc-docker/network_map/certs/client.crt")
+	clientKey  = getEnv("CH_CLIENT_KEY", "/opt/estc-docker/network_map/certs/client.key")
 )
 
 var (
-        subnetRe = regexp.MustCompile(`^\d{1,3}\.\d{1,3}\.\d{1,3}$`)
-        dbNameRe = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
+	subnetRe = regexp.MustCompile(`^\d{1,3}\.\d{1,3}\.\d{1,3}$`)
+	dbNameRe = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
 )
 
 const (
@@ -93,13 +94,13 @@ func getEnv(key, fallback string) string {
 }
 
 func getRequiredEnv(key string) string {
-        if v, ok := os.LookupEnv(key); ok && v != "" {
-                return v
-        }
-        fmt.Printf("ERROR: Environment variable %s is not set or is empty.\n", key)
-        fmt.Println("Please set it before running the program.")
-        os.Exit(1)
-        return ""
+	if v, ok := os.LookupEnv(key); ok && v != "" {
+		return v
+	}
+	fmt.Printf("[ERROR] Environment variable %s is not set or is empty.\n", key)
+	fmt.Println("Please set it before running the program.")
+	os.Exit(1)
+	return ""
 }
 
 var xmlInvalidRe = regexp.MustCompile(`[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\x{D800}-\x{DFFF}\x{FDD0}-\x{FDEF}\x{FFFE}-\x{FFFF}]`)
@@ -159,7 +160,10 @@ func createHTTPClient() (*http.Client, error) {
 
 func chQuery(client *http.Client, sql string) ([][]string, error) {
 	reqURL := fmt.Sprintf("https://%s:%s/?user=%s&password=%s&default_format=TSV", chHost, chPort, chUser, chPass)
-	req, _ := http.NewRequest("POST", reqURL, strings.NewReader(sql))
+	req, err := http.NewRequest("POST", reqURL, strings.NewReader(sql))
+	if err != nil {
+		return nil, fmt.Errorf("[ERROR] creating HTTP request: %w", err)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -167,7 +171,7 @@ func chQuery(client *http.Client, sql string) ([][]string, error) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("ERROR: ClickHouse %d - %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("[ERROR] ClickHouse %d - %s", resp.StatusCode, string(body))
 	}
 	var result [][]string
 	scanner := bufio.NewScanner(resp.Body)
@@ -183,7 +187,7 @@ func chQuery(client *http.Client, sql string) ([][]string, error) {
 }
 
 func fetchConnections(client *http.Client, hours int) ([]Connection, error) {
-        sql := fmt.Sprintf(`SELECT toUnixTimestamp(timestamp), hostname, toString(src_ip), toString(dst_ip), dst_port, comm, direction, service_comm, is_docker_src, is_docker_dst FROM %s.connections WHERE timestamp >= now() - INTERVAL %d HOUR AND toString(src_ip) NOT LIKE '127.0.%%' AND toString(dst_ip) NOT LIKE '127.0.%%' AND src_ip != '0.0.0.0' AND dst_ip != '0.0.0.0' AND dst_port > 0`, chDB, hours)
+	sql := fmt.Sprintf(`SELECT toUnixTimestamp(timestamp), hostname, toString(src_ip), toString(dst_ip), dst_port, comm, direction, service_comm, is_docker_src, is_docker_dst FROM %s.connections WHERE timestamp >= now() - INTERVAL %d HOUR AND toString(src_ip) NOT LIKE '127.0.%%' AND toString(dst_ip) NOT LIKE '127.0.%%' AND src_ip != '0.0.0.0' AND dst_ip != '0.0.0.0' AND dst_port > 0`, chDB, hours)
 	rows, err := chQuery(client, sql)
 	if err != nil {
 		return nil, err
@@ -201,8 +205,8 @@ func fetchConnections(client *http.Client, hours int) ([]Connection, error) {
 }
 
 func fetchHeartbeats(client *http.Client, hours int) ([]Heartbeat, error) {
-        sql := fmt.Sprintf(`SELECT toUnixTimestamp(timestamp), hostname, toString(ip) FROM %s.agent_heartbeat WHERE timestamp >= now() - INTERVAL %d HOUR AND ip != '0.0.0.0' AND toString(ip) NOT LIKE '127.%%'`, chDB, hours)
- 	rows, err := chQuery(client, sql)
+	sql := fmt.Sprintf(`SELECT toUnixTimestamp(timestamp), hostname, toString(ip) FROM %s.agent_heartbeat WHERE timestamp >= now() - INTERVAL %d HOUR AND ip != '0.0.0.0' AND toString(ip) NOT LIKE '127.%%'`, chDB, hours)
+	rows, err := chQuery(client, sql)
 	if err != nil {
 		return nil, err
 	}
@@ -218,7 +222,7 @@ func fetchHeartbeats(client *http.Client, hours int) ([]Heartbeat, error) {
 }
 
 func fetchServices(client *http.Client, hours int) ([]Service, error) {
-        sql := fmt.Sprintf(`SELECT max(toUnixTimestamp(timestamp)) as ts, hostname, type, name, argMax(status, timestamp) as status FROM (SELECT timestamp, hostname, 'docker' as type, name, state as status FROM %s.docker_containers WHERE timestamp >= now() - INTERVAL %d HOUR AND name != '' UNION ALL SELECT timestamp, hostname, 'systemd' as type, name, active_state as status FROM %s.systemd_units WHERE timestamp >= now() - INTERVAL %d HOUR AND name != '' AND (name LIKE '%%.service' OR name LIKE '%%.timer' OR name LIKE '%%.socket')) GROUP BY hostname, type, name`, chDB, hours, chDB, hours)
+	sql := fmt.Sprintf(`SELECT max(toUnixTimestamp(timestamp)) as ts, hostname, type, name, argMax(status, timestamp) as status FROM (SELECT timestamp, hostname, 'docker' as type, name, state as status FROM %s.docker_containers WHERE timestamp >= now() - INTERVAL %d HOUR AND name != '' UNION ALL SELECT timestamp, hostname, 'systemd' as type, name, active_state as status FROM %s.systemd_units WHERE timestamp >= now() - INTERVAL %d HOUR AND name != '' AND (name LIKE '%%.service' OR name LIKE '%%.timer' OR name LIKE '%%.socket')) GROUP BY hostname, type, name`, chDB, hours, chDB, hours)
 	rows, err := chQuery(client, sql)
 	if err != nil {
 		return nil, err
@@ -235,8 +239,8 @@ func fetchServices(client *http.Client, hours int) ([]Service, error) {
 }
 
 func fetchPortToProcess(client *http.Client, hours int) ([]PortProcess, error) {
-        sql := fmt.Sprintf(`SELECT toUnixTimestamp(timestamp), hostname, port, process FROM %s.listening_ports WHERE timestamp >= now() - INTERVAL %d HOUR AND process NOT IN ('', 'unknown')`, chDB, hours)
- 	rows, err := chQuery(client, sql)
+	sql := fmt.Sprintf(`SELECT toUnixTimestamp(timestamp), hostname, port, process FROM %s.listening_ports WHERE timestamp >= now() - INTERVAL %d HOUR AND process NOT IN ('', 'unknown')`, chDB, hours)
+	rows, err := chQuery(client, sql)
 	if err != nil {
 		return nil, err
 	}
@@ -302,11 +306,12 @@ func isProxy(serviceName string) bool {
 	return false
 }
 
-func detectProxies(conns []ResolvedConn, localHosts map[string]bool) map[string]bool {
+func detectProxies(conns []ResolvedConn, localHosts map[string]bool) map[string]string {
 	nodeInboundPorts := make(map[string]map[string]bool)
 	nodeOutboundPorts := make(map[string]map[string]bool)
 	nodeOutboundHosts := make(map[string]map[string]bool)
 	nodeServices := make(map[string]map[string]bool)
+
 	for _, c := range conns {
 		dst, src, dir, svc, port := c.Dst, c.Src, c.Direction, strings.ToLower(c.Service), c.Port
 		if dir == "1" || dir == "inbound" {
@@ -335,7 +340,8 @@ func detectProxies(conns []ResolvedConn, localHosts map[string]bool) map[string]
 			nodeServices[src][svc] = true
 		}
 	}
-	proxyNodes := make(map[string]bool)
+
+	proxyNodes := make(map[string]string)
 	allNodes := make(map[string]bool)
 	for n := range nodeInboundPorts {
 		allNodes[n] = true
@@ -343,15 +349,27 @@ func detectProxies(conns []ResolvedConn, localHosts map[string]bool) map[string]
 	for n := range nodeServices {
 		allNodes[n] = true
 	}
+
 	for node := range allNodes {
 		inboundPorts, outboundPorts, outboundHosts, services := nodeInboundPorts[node], nodeOutboundPorts[node], nodeOutboundHosts[node], nodeServices[node]
+
 		isKnownProxy := false
+		rpServiceName := ""
+
 		for svc := range services {
-			if isProxy(svc) {
-				isKnownProxy = true
+			svcLower := strings.ToLower(svc)
+			for proxy := range proxyNames {
+				if svcLower == proxy || strings.HasPrefix(svcLower, proxy+"-") || strings.HasPrefix(svcLower, proxy+"/") {
+					isKnownProxy = true
+					rpServiceName = proxy
+					break
+				}
+			}
+			if isKnownProxy {
 				break
 			}
 		}
+
 		hasWebInbound := false
 		for port := range inboundPorts {
 			if webPorts[port] {
@@ -367,8 +385,26 @@ func detectProxies(conns []ResolvedConn, localHosts map[string]bool) map[string]
 				break
 			}
 		}
-		if isKnownProxy || (hasWebInbound && hasOutbound && hasBackendOutbound) {
-			proxyNodes[node] = true
+
+		isRP := false
+
+		if hasBackendOutbound {
+			if isKnownProxy {
+				isRP = true
+			} else if hasWebInbound && hasOutbound {
+				isRP = true
+				for svc := range services {
+					if !strings.Contains(svc, ".service") && !strings.Contains(svc, ".timer") && !strings.Contains(svc, ".socket") {
+						parts := strings.Split(strings.ToLower(svc), ".")
+						rpServiceName = parts[0]
+						break
+					}
+				}
+			}
+		}
+
+		if isRP && rpServiceName != "" {
+			proxyNodes[node] = rpServiceName
 		}
 	}
 	return proxyNodes
@@ -445,51 +481,126 @@ func buildWindowData(subnet string, hours int, nowUnix int64, allConns []Connect
 	return WindowData{Conns: conns, IPToHost: ipToHost, HostToPrimary: hostToPrimary, LocalHosts: localHosts, Services: services, PortProc: portProc}
 }
 
-func resolveConnections(conns []Connection, data WindowData) ([]ResolvedConn, map[string]string) {
+func resolveConnections(conns []Connection, data WindowData) ([]ResolvedConn, map[string]string, map[string]bool) {
 	containerToHost := make(map[string]string)
+	containerHostLinks := make(map[string]map[string]int)
+	containerIPs := make(map[string]bool)
+
 	var resolved []ResolvedConn
 	for _, c := range conns {
 		srcHost := normalizeHostname(c.Hostname)
 		dstIP := c.DstIP
-		dstHostRaw, ok := data.IPToHost[dstIP]
-		var dstHost string
-		if ok {
-			dstHost = dstHostRaw
-		} else if strings.HasPrefix(dstIP, "192.168.") || strings.HasPrefix(dstIP, "10.") || strings.HasPrefix(dstIP, "172.") {
-			dstHost = "U-" + dstIP
+
+		var srcNodeID, dstNodeID string
+
+		if c.IsDockerSrc {
+			service := getAutomatedServiceName(c.ProcessName, 0, true)
+			srcNodeID = fmt.Sprintf("CTR::%s||%s", service, c.SrcIP)
+			containerIPs[c.SrcIP] = true
+			if containerHostLinks[srcNodeID] == nil {
+				containerHostLinks[srcNodeID] = make(map[string]int)
+			}
+			containerHostLinks[srcNodeID][srcHost]++
 		} else {
-			dstHost = "E-" + dstIP
+			srcNodeID = srcHost
 		}
-		if !data.LocalHosts[srcHost] && !data.LocalHosts[dstHost] {
+
+		if c.IsDockerDst {
+			rawService := c.ServiceComm
+			if rawService == "" {
+				rawService = c.ProcessName
+			}
+			if rawService == "" {
+				rawService = data.PortProc[fmt.Sprintf("%s|%d", srcHost, c.DstPort)]
+			}
+			service := getAutomatedServiceName(rawService, c.DstPort, true)
+			dstNodeID = fmt.Sprintf("CTR::%s||%s", service, dstIP)
+			containerIPs[dstIP] = true
+			if containerHostLinks[dstNodeID] == nil {
+				containerHostLinks[dstNodeID] = make(map[string]int)
+			}
+			containerHostLinks[dstNodeID][srcHost]++
+		} else {
+			dstHostRaw, ok := data.IPToHost[dstIP]
+			var dstHost string
+			if ok {
+				dstHost = dstHostRaw
+			} else if strings.HasPrefix(dstIP, "192.168.") || strings.HasPrefix(dstIP, "10.") || strings.HasPrefix(dstIP, "172.") {
+				dstHost = "U-" + dstIP
+			} else {
+				dstHost = "E-" + dstIP
+			}
+			dstNodeID = dstHost
+		}
+
+		srcIsLocal := data.LocalHosts[srcHost]
+		dstIsLocal := data.LocalHosts[dstNodeID]
+		srcIsCtr := c.IsDockerSrc
+		dstIsCtr := c.IsDockerDst
+
+		if !srcIsLocal && !dstIsLocal && !srcIsCtr && !dstIsCtr {
 			continue
 		}
-		if srcHost == dstHost {
+
+		if srcNodeID == dstNodeID && !srcIsCtr && !dstIsCtr {
 			continue
 		}
-		dstIPResolved := data.HostToPrimary[dstHost]
-		if dstIPResolved == "" {
-			dstIPResolved = c.DstIP
+
+		dstIPResolved := dstIP
+		if !dstIsCtr {
+			if resolvedIP, ok := data.HostToPrimary[dstNodeID]; ok {
+				dstIPResolved = resolvedIP
+			}
 		}
+
 		parts := strings.Split(dstIPResolved, ".")
 		var dstSubnet string
-		if len(parts) == 4 && !strings.HasPrefix(dstIPResolved, "127.") && !strings.HasPrefix(dstIPResolved, "U-") && !strings.HasPrefix(dstIPResolved, "E-") {
+		if len(parts) == 4 && net.ParseIP(dstIPResolved) != nil && !strings.HasPrefix(dstIPResolved, "127.") && !strings.HasPrefix(dstIPResolved, "U-") && !strings.HasPrefix(dstIPResolved, "E-") {
 			dstSubnet = strings.Join(parts[:3], ".")
 		}
-		rawService := c.ServiceComm
-		if rawService == "" {
-			rawService = c.ProcessName
+
+		var service string
+		if dstIsCtr {
+			rawService := c.ServiceComm
+			if rawService == "" {
+				rawService = c.ProcessName
+			}
+			if rawService == "" {
+				rawService = data.PortProc[fmt.Sprintf("%s|%d", srcHost, c.DstPort)]
+			}
+			service = getAutomatedServiceName(rawService, c.DstPort, true)
+		} else {
+			rawService := c.ServiceComm
+			if rawService == "" {
+				rawService = c.ProcessName
+			}
+			if rawService == "" {
+				rawService = data.PortProc[fmt.Sprintf("%s|%d", dstNodeID, c.DstPort)]
+			}
+			service = getAutomatedServiceName(rawService, c.DstPort, false)
 		}
-		if rawService == "" {
-			rawService = data.PortProc[fmt.Sprintf("%s|%d", dstHost, c.DstPort)]
-		}
-		service := getAutomatedServiceName(rawService, c.DstPort, c.IsDockerDst)
-		nodeID := dstHost
-		if c.IsDockerDst {
-			nodeID = fmt.Sprintf("CTR::%s||%s", service, c.DstIP)
-			containerToHost[nodeID] = srcHost
-		}
-		resolved = append(resolved, ResolvedConn{Src: srcHost, Dst: nodeID, DstIP: dstIP, DstSubnet: dstSubnet, Port: strconv.Itoa(c.DstPort), Service: service, Direction: c.Direction})
+
+		resolved = append(resolved, ResolvedConn{
+			Src: srcNodeID, Dst: dstNodeID, DstIP: dstIP,
+			DstSubnet: dstSubnet, Port: strconv.Itoa(c.DstPort),
+			Service: service, Direction: c.Direction,
+		})
 	}
+
+	for nodeID, hosts := range containerHostLinks {
+		maxCount := 0
+		bestHost := ""
+		for host, count := range hosts {
+			if count > maxCount {
+				maxCount = count
+				bestHost = host
+			}
+		}
+		if bestHost != "" {
+			containerToHost[nodeID] = bestHost
+		}
+	}
+
 	seen := make(map[string]bool)
 	var uniq []ResolvedConn
 	for _, r := range resolved {
@@ -499,7 +610,7 @@ func resolveConnections(conns []Connection, data WindowData) ([]ResolvedConn, ma
 			uniq = append(uniq, r)
 		}
 	}
-	return uniq, containerToHost
+	return uniq, containerToHost, containerIPs
 }
 
 func layoutHosts(hosts []string, cx, cy float64) (map[string]Coord, map[string]float64) {
@@ -622,22 +733,25 @@ const svgTemplate = `<?xml version="1.0" encoding="UTF-8"?>
   <defs>
     <marker id="arrow-out" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L0,8 L8,4 z" fill="#39c0ed" /></marker>
     <marker id="arrow-in" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L0,8 L8,4 z" fill="#7ee787" /></marker>
-    <marker id="arrow-proxy" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L0,8 L8,4 z" fill="#a855f7" /></marker>
+    <marker id="arrow-proxy-in" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L0,8 L8,4 z" fill="#a855f7" /></marker>
+    <marker id="arrow-proxy-out" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L0,8 L8,4 z" fill="#f85149" /></marker>
   </defs>
   <g id="viewport">
   <text x="{{.CenterX}}" y="35" fill="#f0f6fc" font-size="22" font-weight="600" text-anchor="middle">Network Topology — {{.Subnet}}.0 · {{.WindowKey}}</text>
   {{template "timeTabs" .}}
   <text x="{{.CenterX}}" y="122" fill="#8b949e" font-size="12" text-anchor="middle">{{.Timestamp}} · Hosts: {{.HostsCount}} · Containers: {{.ContainersCount}} · Connections: {{.ConnsCount}}</text>
   <g transform="translate(20, {{.LegendY}})">
-    <rect x="0" y="0" width="280" height="90" rx="6" fill="#1c2128" stroke="#30363d" stroke-width="1" opacity="0.9"/>
-    <line x1="15" y1="18" x2="40" y2="18" stroke="#39c0ed" stroke-width="2" marker-end="url(#arrow-out)"/>
-    <text x="50" y="22" fill="#39c0ed" font-size="11">Outbound ({{.OutboundCount}})</text>
-    <line x1="15" y1="38" x2="40" y2="38" stroke="#7ee787" stroke-width="2" marker-end="url(#arrow-in)"/>
-    <text x="50" y="42" fill="#7ee787" font-size="11">Inbound ({{.InboundCount}})</text>
-    <line x1="15" y1="58" x2="40" y2="58" stroke="#a855f7" stroke-width="2" marker-end="url(#arrow-proxy)"/>
-    <text x="50" y="62" fill="#a855f7" font-size="11">Reverse Proxy</text>
-    <line x1="15" y1="78" x2="40" y2="78" stroke="#8b949e" stroke-width="2" stroke-dasharray="4,4"/>
-    <text x="50" y="82" fill="#8b949e" font-size="11">Hosted by (Docker)</text>
+    <rect x="0" y="0" width="280" height="115" rx="6" fill="#1c2128" stroke="#30363d" stroke-width="1" opacity="0.9"/>
+    <line x1="15" y1="18" x2="40" y2="18" stroke="#a855f7" stroke-width="2" marker-end="url(#arrow-proxy-in)"/>
+    <text x="50" y="22" fill="#a855f7" font-size="11">Inbound to Reverse Proxy</text>
+    <line x1="15" y1="38" x2="40" y2="38" stroke="#f85149" stroke-width="2" marker-end="url(#arrow-proxy-out)"/>
+    <text x="50" y="42" fill="#f85149" font-size="11">RP to Backend</text>
+    <line x1="15" y1="58" x2="40" y2="58" stroke="#7ee787" stroke-width="2" marker-end="url(#arrow-in)"/>
+    <text x="50" y="62" fill="#7ee787" font-size="11">Normal Inbound</text>
+    <line x1="15" y1="78" x2="40" y2="78" stroke="#39c0ed" stroke-width="2" marker-end="url(#arrow-out)"/>
+    <text x="50" y="82" fill="#39c0ed" font-size="11">Normal Outbound</text>
+    <line x1="15" y1="98" x2="40" y2="98" stroke="#8b949e" stroke-width="2" stroke-dasharray="4,4"/>
+    <text x="50" y="102" fill="#8b949e" font-size="11">Hosted by (Docker)</text>
   </g>
   {{range .HostingLines}}
   <line class="hosting-line" data-host="{{.HostID}}" x1="{{.X1}}" y1="{{.Y1}}" x2="{{.X2}}" y2="{{.Y2}}" stroke="#8b949e" stroke-width="1.5" />
@@ -885,14 +999,28 @@ const svgTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 var svgTmpl *template.Template
 
 func init() {
-        funcMap := template.FuncMap{
-                "add":        func(a, b float64) float64 { return a + b },
-                "sub":        func(a, b float64) float64 { return a - b },
-                "escapeHTML": func(s string) string { return html.EscapeString(s) },
-        }
-        svgTmpl = template.Must(template.New("map").Funcs(funcMap).Parse(svgTemplate))
-}
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "ESTC Map Generator - Network Topology Visualization Tool\n\n")
+		fmt.Fprintf(os.Stderr, "Usage:\n")
+		fmt.Fprintf(os.Stderr, "  estc-map-generator [OPTIONS]\n\n")
+		fmt.Fprintf(os.Stderr, "Options:\n")
+		flag.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "\nExamples:\n")
+		fmt.Fprintf(os.Stderr, "  1. Generate maps for all time windows for a specific subnet:\n")
+		fmt.Fprintf(os.Stderr, "     CLICKHOUSE_PASS=\"your_password\" ./estc-map-generator --subnet=\"172.20.44\"\n\n")
+		fmt.Fprintf(os.Stderr, "  2. Generate a map only for the last 24 hours:\n")
+		fmt.Fprintf(os.Stderr, "     CLICKHOUSE_PASS=\"your_password\" ./estc-map-generator --subnet=\"172.20.44\" --window=\"24h\"\n\n")
+		fmt.Fprintf(os.Stderr, "  3. Override default ClickHouse connection settings:\n")
+		fmt.Fprintf(os.Stderr, "     CLICKHOUSE_HOST=\"10.0.0.5\" CLICKHOUSE_PORT=\"8443\" CLICKHOUSE_PASS=\"secret\" ./estc-map-generator --subnet=\"10.0.0\"\n")
+	}
 
+	funcMap := template.FuncMap{
+		"add":        func(a, b float64) float64 { return a + b },
+		"sub":        func(a, b float64) float64 { return a - b },
+		"escapeHTML": func(s string) string { return html.EscapeString(s) },
+	}
+	svgTmpl = template.Must(template.New("map").Funcs(funcMap).Parse(svgTemplate))
+}
 
 func renderSVG(subnet, windowKey string, conns []ResolvedConn, services map[string][]Service, localHosts map[string]bool, containerToHost map[string]string, hosts []string) error {
 	coords, _ := layoutHosts(hosts, 0, 0)
@@ -932,31 +1060,39 @@ func renderSVG(subnet, windowKey string, conns []ResolvedConn, services map[stri
 	for cont, host := range containerToHost {
 		hostContainers[host] = append(hostContainers[host], cont)
 	}
+
 	containerCoords := make(map[string]Coord)
 	for host, contList := range hostContainers {
 		hc, ok := finalCoords[host]
 		if !ok {
 			hc = Coord{X: centerX, Y: centerY}
 		}
-		outDX := hc.X - centerX
-		outDY := hc.Y - centerY
-		outLen := math.Hypot(outDX, outDY)
-		if outLen == 0 {
-			outLen = 1.0
-		}
-		ox, oy := outDX/outLen, outDY/outLen
-		px, py := -oy, ox
+
 		n := len(contList)
-		spread := math.Min(CONTAINER_RADIUS, 30+float64(n)*14)
+		baseAngle := math.Atan2(hc.Y - centerY, hc.X - centerX)
+
+		minRadius := 110.0
+		requiredRadius := (float64(n) * 110.0) / math.Pi
+		radius := math.Max(minRadius, requiredRadius)
+
+		span := math.Pi
+		startAngle := baseAngle - span/2.0
+
 		for i, c := range contList {
-			t := 0.0
-			if n > 1 {
-				t = (float64(i) - (float64(n-1) / 2)) / math.Max(1, float64(n-1)/2)
+			var angle float64
+			if n == 1 {
+				angle = baseAngle
+			} else {
+				angle = startAngle + (float64(i) / float64(n-1)) * span
 			}
-			base := CONTAINER_RADIUS + float64(i%2)*16
-			containerCoords[c] = Coord{X: hc.X + ox*base + px*t*spread, Y: hc.Y + oy*base + py*t*spread}
+
+			containerCoords[c] = Coord{
+				X: hc.X + radius * math.Cos(angle),
+				Y: hc.Y + radius * math.Sin(angle),
+			}
 		}
 	}
+
 	data := RenderData{
 		ViewW: canvasW, ViewH: canvasH, LegendY: canvasH - 100,
 		CenterX: centerX, CenterY: centerY, Subnet: subnet, WindowKey: windowKey,
@@ -989,7 +1125,9 @@ func renderSVG(subnet, windowKey string, conns []ResolvedConn, services map[stri
 	}
 	svcJSON, _ := json.Marshal(servicesCompact)
 	data.ServicesJSON = string(svcJSON)
+
 	proxyNodes := detectProxies(conns, localHosts)
+
 	for cont, host := range containerToHost {
 		hc, hOk := finalCoords[host]
 		cc, cOk := containerCoords[cont]
@@ -1039,10 +1177,15 @@ func renderSVG(subnet, windowKey string, conns []ResolvedConn, services map[stri
 		sy2 := srcCoord.Y + (dstCoord.Y-srcCoord.Y)*srcR/dist
 		dx2 := dstCoord.X - (dstCoord.X-srcCoord.X)*dstR/dist
 		dy2 := dstCoord.Y - (dstCoord.Y-srcCoord.Y)*dstR/dist
+
 		portInt, _ := strconv.Atoi(c.Port)
-		isProxyDst := proxyNodes[c.Dst]
-		isProxySrc := proxyNodes[c.Src]
+
+		rpServiceNameDst := proxyNodes[c.Dst]
+		isProxyDst := rpServiceNameDst != ""
 		isActualProxyDst := isProxyDst && webProxyPorts[portInt]
+
+		rpServiceNameSrc := proxyNodes[c.Src]
+
 		dir := strings.TrimSpace(c.Direction)
 		if dir == "1" || dir == "inbound" {
 			data.InboundCount++
@@ -1050,19 +1193,30 @@ func renderSVG(subnet, windowKey string, conns []ResolvedConn, services map[stri
 		} else {
 			data.OutboundCount++
 		}
+
 		var color, marker string
-		if dir == "1" || dir == "inbound" {
+		if isActualProxyDst {
+			color, marker = "#a855f7", "url(#arrow-proxy-in)"
+		} else if rpServiceNameSrc != "" {
+			connService := strings.ToLower(c.Service)
+			connService = strings.Split(connService, ".")[0]
+			connService = strings.Split(connService, "-")[0]
+
+			if connService == rpServiceNameSrc || strings.Contains(connService, rpServiceNameSrc) || strings.Contains(rpServiceNameSrc, connService) {
+				color, marker = "#f85149", "url(#arrow-proxy-out)"
+			} else {
+				color, marker = "#39c0ed", "url(#arrow-out)"
+			}
+		} else if dir == "1" || dir == "inbound" {
 			color, marker = "#7ee787", "url(#arrow-in)"
-		} else if isActualProxyDst {
-			color, marker = "#a855f7", "url(#arrow-proxy)"
-		} else if isProxySrc {
-			color, marker = "#39c0ed", "url(#arrow-out)"
 		} else {
 			color, marker = "#39c0ed", "url(#arrow-out)"
 		}
-		offset := float64((edgeIdx%5 - 2) * 12)
-		mx := (sx2+dx2)/2 + (dy2-sy2)*offset/dist
-		my := (sy2+dy2)/2 - (dx2-sx2)*offset/dist
+
+		offset := dist * 0.15
+		mx := (sx2+dx2)/2 + (dy2-sy2)*(offset/dist)
+		my := (sy2+dy2)/2 - (dx2-sx2)*(offset/dist)
+
 		isCtrEdge := false
 		ctrHost := ""
 		if _, ok := containerCoords[c.Src]; ok {
@@ -1096,6 +1250,7 @@ func renderSVG(subnet, windowKey string, conns []ResolvedConn, services map[stri
 	}
 	fmt.Printf("DEBUG: Total resolved: %d | Skipped (no coords): %d | Drawn total: %d | Drawn inbound: %d\n",
 		len(conns), skippedNoCoords, drawnTotal, drawnInbound)
+
 	for _, h := range hosts {
 		c := finalCoords[h]
 		isHost := localHosts[h]
@@ -1110,9 +1265,12 @@ func renderSVG(subnet, windowKey string, conns []ResolvedConn, services map[stri
 		}
 		nodeIDAttr := strings.NewReplacer("::", "-", "||", "-", " ", "-", "/", "-").Replace(h)
 		contCount := len(hostContainers[h])
+
+		_, isProxy := proxyNodes[h]
+
 		data.Nodes = append(data.Nodes, NodeData{
 			X: c.X, Y: c.Y, ID: id, DisplayName: displayName,
-			Stroke: stroke, Fill: fill, IsHost: isHost, IsProxy: proxyNodes[h],
+			Stroke: stroke, Fill: fill, IsHost: isHost, IsProxy: isProxy,
 			NodeIDAttr: nodeIDAttr, HasContainers: contCount > 0, ContainerCount: contCount,
 		})
 	}
@@ -1142,117 +1300,166 @@ func renderSVG(subnet, windowKey string, conns []ResolvedConn, services map[stri
 	outPath := mapPath(subnet, windowKey)
 	file, err := os.Create(outPath)
 	if err != nil {
-		return fmt.Errorf("ERROR: Сreate file: %w", err)
+		return fmt.Errorf("[ERROR] Create file: %w", err)
 	}
 	defer file.Close()
 	if err := svgTmpl.Execute(file, data); err != nil {
-		return fmt.Errorf("ERROR: Template execution - %w", err)
+		return fmt.Errorf("[ERROR] Template execution - %w", err)
 	}
 	return nil
 }
 
 func main() {
-	subnet := flag.String("subnet", "172.20.44", "Target subnet")
-	window := flag.String("window", "", "Specific window (e.g., 24h)")
+	subnet := flag.String("subnet", "172.20.44", "Target subnet to visualize (e.g., 172.20.44)")
+	window := flag.String("window", "", "Specific time window to process (e.g., 1h, 4h, 24h, 7d). If empty, processes all windows.")
 	flag.Parse()
-        if !subnetRe.MatchString(*subnet) {
-                fmt.Printf("ERROR: Invalid subnet format '%s'.\n", *subnet)
-                fmt.Println("   Expected a three-octet format, e.g 172.20.44")
-                os.Exit(1)
-        }
 
-        if !dbNameRe.MatchString(chDB) {
-                fmt.Printf("ERROR: Invalid database name format '%s'.\n", chDB)
-                fmt.Println("   Only Latin letters, digits, and the '_'. character are allowed")
-                os.Exit(1)
-        }
+	if chPass == "" {
+		fmt.Println("[ERROR] Environment variable CLICKHOUSE_PASS is not set or is empty.")
+		fmt.Println("Please set it before running the program. Use --help for usage information.")
+		os.Exit(1)
+	}
+	chPass = url.QueryEscape(chPass)
+
+	if !subnetRe.MatchString(*subnet) {
+		fmt.Printf("[ERROR] Invalid subnet format '%s'.\n", *subnet)
+		fmt.Println("   Expected a three-octet format, e.g 172.20.44")
+		os.Exit(1)
+	}
+
+	if !dbNameRe.MatchString(chDB) {
+		fmt.Printf("[ERROR] Invalid database name format '%s'.\n", chDB)
+		fmt.Println("   Only Latin letters, digits, and the '_'. character are allowed")
+		os.Exit(1)
+	}
 
 	fmt.Printf("Subnet: %s\n", *subnet)
 	fmt.Println("  Initializing mTLS client...")
 	client, err := createHTTPClient()
 	if err != nil {
-		fmt.Printf("ERROR: Initializing mTLS: %v\n", err)
+		fmt.Printf("[ERROR] Initializing mTLS: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Println("   mTLS client create")
 
-        os.MkdirAll(outputDir, 0755)
-        var generated []string
-        nowUnix := time.Now().Unix()
+	os.MkdirAll(outputDir, 0755)
+	var generated []string
+	nowUnix := time.Now().Unix()
 
-        for _, tw := range TIME_WINDOWS {
-                if *window != "" && *window != tw.Key {
-                        continue
-                }
+	for _, tw := range TIME_WINDOWS {
+		if *window != "" && *window != tw.Key {
+			continue
+		}
 
-                fmt.Printf("  Processing %s window (fetching up to %d hours of data)...\n", tw.Key, tw.Hours)
+		fmt.Printf("  Processing %s window (fetching up to %d hours of data)...\n", tw.Key, tw.Hours)
 
-                conns, err := fetchConnections(client, tw.Hours)
-                if err != nil {
-                        fmt.Printf("ERROR: Connections - %v\n", err)
-                        continue // Пропускаем это окно, но не ломаем весь цикл
-                }
+		conns, err := fetchConnections(client, tw.Hours)
+		if err != nil {
+			fmt.Printf("[ERROR] Connections - %v\n", err)
+			continue
+		}
 
-                hbs, err := fetchHeartbeats(client, tw.Hours)
-                if err != nil {
-                        fmt.Printf("ERROR: Heartbeats - %v\n", err)
-                        continue
-                }
+		hbs, err := fetchHeartbeats(client, tw.Hours)
+		if err != nil {
+			fmt.Printf("[ERROR] Heartbeats - %v\n", err)
+			continue
+		}
 
-                svc, err := fetchServices(client, tw.Hours)
-                if err != nil {
-                        fmt.Printf("ERROR: Services - %v\n", err)
-                        continue
-                }
+		svc, err := fetchServices(client, tw.Hours)
+		if err != nil {
+			fmt.Printf("[ERROR] Services - %v\n", err)
+			continue
+		}
 
-                ports, err := fetchPortToProcess(client, tw.Hours)
-                if err != nil {
-                        fmt.Printf("ERROR: Ports - %v\n", err)
-                        continue
-                }
+		ports, err := fetchPortToProcess(client, tw.Hours)
+		if err != nil {
+			fmt.Printf("[ERROR] Ports - %v\n", err)
+			continue
+		}
 
-                // buildWindowData теперь получает уже отфильтрованные данные, 
-                // но внутренняя проверка по времени (cutoff) останется как дополнительный рубеж защиты.
-                data := buildWindowData(*subnet, tw.Hours, nowUnix, conns, hbs, svc, ports)
-                resolved, containerToHost := resolveConnections(data.Conns, data)
+		data := buildWindowData(*subnet, tw.Hours, nowUnix, conns, hbs, svc, ports)
+		resolved, containerToHost, containerIPs := resolveConnections(data.Conns, data)
 
-                fmt.Printf("  [%3s] connections=%4d hosts=%d containers=%d\n", tw.Key, len(resolved), len(data.LocalHosts), len(containerToHost))
+		// =========================================================================
+		// === ИНВЕНТАРЬ: Гарантируем отображение ВСЕХ контейнеров, даже без трафика (Idle) ===
+		// =========================================================================
+		activeContainers := make(map[string]bool)
+		for ctrID := range containerToHost {
+			if strings.HasPrefix(ctrID, "CTR::") {
+				parts := strings.Split(ctrID, "||")
+				if len(parts) >= 1 {
+					name := strings.Replace(parts[0], "CTR::", "", 1)
+					activeContainers[name] = true
+				}
+			}
+		}
 
-                hostSet := make(map[string]bool)
-                for _, c := range resolved {
-                        if _, isCtr := containerToHost[c.Src]; !isCtr {
-                                hostSet[c.Src] = true
-                        }
-                        if _, isCtr := containerToHost[c.Dst]; !isCtr {
-                                hostSet[c.Dst] = true
-                        }
-                }
-                for host := range data.Services {
-                        if _, isCtr := containerToHost[host]; !isCtr {
-                                hostSet[host] = true
-                        }
-                }
-                for _, host := range containerToHost {
-                        hostSet[host] = true
-                }
+		for host, svcs := range data.Services {
+			for _, svc := range svcs {
+				if svc.Type == "docker" && !activeContainers[svc.Name] {
+					ctrNodeID := fmt.Sprintf("CTR::%s||unknown", svc.Name)
+					containerToHost[ctrNodeID] = host
+				}
+			}
+		}
+		// =========================================================================
 
-                var hosts []string
-                for h := range hostSet {
-                        hosts = append(hosts, h)
-                }
+		fmt.Printf("  [%3s] connections=%4d hosts=%d containers=%d\n", tw.Key, len(resolved), len(data.LocalHosts), len(containerToHost))
 
-                err = renderSVG(*subnet, tw.Key, resolved, data.Services, data.LocalHosts, containerToHost, hosts)
-                if err != nil {
-                        fmt.Printf("ERROR: Rendering %s: %v\n", tw.Key, err)
-                        continue
-                }
+		hostSet := make(map[string]bool)
+		for _, c := range resolved {
+			if _, isCtr := containerToHost[c.Src]; !isCtr {
+				srcIPForCheck := ""
+				if strings.HasPrefix(c.Src, "CTR::") {
+					parts := strings.Split(c.Src, "||")
+					if len(parts) == 2 {
+						srcIPForCheck = parts[1]
+					}
+				}
+				if srcIPForCheck == "" || !containerIPs[srcIPForCheck] {
+					hostSet[c.Src] = true
+				}
+			}
+			if _, isCtr := containerToHost[c.Dst]; !isCtr {
+				dstIPForCheck := c.DstIP
+				if strings.HasPrefix(c.Dst, "CTR::") {
+					parts := strings.Split(c.Dst, "||")
+					if len(parts) == 2 {
+						dstIPForCheck = parts[1]
+					}
+				}
+				if !containerIPs[dstIPForCheck] {
+					hostSet[c.Dst] = true
+				}
+			}
+		}
 
-                outPath := mapPath(*subnet, tw.Key)
-                info, _ := os.Stat(outPath)
-                fmt.Printf("%s (%.1f KB)\n", outPath, float64(info.Size())/1024)
-                generated = append(generated, tw.Key)
-        }
-        if len(generated) > 0 {
+		for host := range data.Services {
+			if _, isCtr := containerToHost[host]; !isCtr {
+				hostSet[host] = true
+			}
+		}
+		for _, host := range containerToHost {
+			hostSet[host] = true
+		}
+
+		var hosts []string
+		for h := range hostSet {
+			hosts = append(hosts, h)
+		}
+
+		err = renderSVG(*subnet, tw.Key, resolved, data.Services, data.LocalHosts, containerToHost, hosts)
+		if err != nil {
+			fmt.Printf("[ERROR] Rendering %s: %v\n", tw.Key, err)
+			continue
+		}
+
+		outPath := mapPath(*subnet, tw.Key)
+		info, _ := os.Stat(outPath)
+		fmt.Printf("%s (%.1f KB)\n", outPath, float64(info.Size())/1024)
+		generated = append(generated, tw.Key)
+	}
+	if len(generated) > 0 {
 		defaultFile := mapPath(*subnet, DEFAULT_WINDOW)
 		aliasFile := filepath.Join(outputDir, fmt.Sprintf("map_%s.svg", *subnet))
 		os.Remove(aliasFile)
@@ -1260,7 +1467,7 @@ func main() {
 		fmt.Printf(" alias: %s → %s\n", aliasFile, DEFAULT_WINDOW)
 		fmt.Printf(" OK: %d map for %s\n", len(generated), *subnet)
 	} else {
-		fmt.Println("WARNING: Nothing generated.")
+		fmt.Println("[WARNING] Nothing generated.")
 		os.Exit(1)
 	}
 }
