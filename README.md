@@ -1,7 +1,8 @@
 # ESTC Linux Agent
 # IMAGE
 <img width="1187" height="918" alt="image" src="https://github.com/user-attachments/assets/9b72accf-673a-43ed-8706-78142264d453" />
-<img width="877" height="782" alt="image" src="https://github.com/user-attachments/assets/c682ceab-cf33-40bb-8fd0-44431391c662" />
+<img width="1187" height="918" alt="12" src="https://github.com/user-attachments/assets/0a5eabdf-5fbe-4d22-b2c4-627063184d0c" />
+
 
 #      ENG
 
