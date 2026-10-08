@@ -1,6 +1,5 @@
 # ESTC Linux Agent
 # IMAGE
-<img width="1187" height="918" alt="image" src="https://github.com/user-attachments/assets/2afc3a53-9ccc-44a4-9386-f39b9f30e9b9" /><img width="1187" height="918" alt="image" src="https://github.com/user-attachments/assets/30ee16c6-616a-454c-bcb0-930e5e4edb16" /># ESTC Linux Agent
 <img width="1187" height="918" alt="image" src="https://github.com/user-attachments/assets/9b72accf-673a-43ed-8706-78142264d453" />
 <img width="877" height="782" alt="image" src="https://github.com/user-attachments/assets/c682ceab-cf33-40bb-8fd0-44431391c662" />
 
